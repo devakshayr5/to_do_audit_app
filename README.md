@@ -38,38 +38,32 @@ npm run dev               # http://localhost:5173
 ```
 Open http://localhost:5173. Type a name in **Acting as** (top right) and start adding to-dos.
 
-## API
-| Method | URL | Purpose |
-|---|---|---|
-| GET | `/api/todos?status=pending\|completed` | List, optional filter |
-| GET | `/api/todos/:id` | One to-do |
-| POST | `/api/todos` | Create |
-| PUT | `/api/todos/:id` | Edit |
-| PATCH | `/api/todos/:id/status` | Mark pending / completed |
-| DELETE | `/api/todos/:id` | Delete |
-| GET | `/api/todos/:id/audit` | History of one to-do |
-| GET | `/api/audit?limit=100` | Recent changes of all to-dos (incl. deleted) |
-
 The acting user is sent in the `X-User` request header.
 
 ## Audit design note
-* **Table `todo_audit`**: `todo_id`, `action` (INSERT/UPDATE/DELETE), `old_values` and
-  `new_values` (JSON), `changed_by`, `changed_at` (millisecond precision).
-* **Triggers** `AFTER INSERT/UPDATE/DELETE` on `todos` build the JSON with `JSON_OBJECT`.
-  Because they run inside MySQL, the audit cannot be skipped by a bug in the app, and it also
-  captures changes made from other tools (Workbench, scripts). UPDATE triggers skip no-op
-  updates using the NULL-safe `<=>` operator.
-* **Who changed it**: the API sets the session variable `@app_user` before each write and the
-  triggers read it. `runAsUser()` in `backend/src/db.js` borrows ONE pooled connection, sets the
-  variable, runs the write in a transaction on that same connection, then clears the variable.
-  If `@app_user` is not set, the trigger falls back to `CONCAT('db:', CURRENT_USER())`.
-* **No foreign key** from `todo_audit.todo_id` to `todos.id`, so history survives deletion.
-* **Limitation**: the user name comes from a header and is not authenticated. In production,
-  derive it from a login token (JWT/session).
+Every change to a to-do is logged by MySQL itself, using triggers. The Node.js code
+never writes to the audit table.
 
-## Quick check of the triggers
-```bash
-curl -X POST localhost:5000/api/todos -H "Content-Type: application/json" -H "X-User: alice" -d '{"title":"Test"}'
-curl -X PATCH localhost:5000/api/todos/1/status -H "Content-Type: application/json" -H "X-User: bob" -d '{"status":"completed"}'
-mysql -u root -p -e "SELECT * FROM todo_app.todo_audit\G"
-```
+**Tables**
+- `todos` holds the to-do items.
+- `todo_audit` holds the history: to-do id, action (INSERT / UPDATE / DELETE),
+  old values, new values, who changed it and when. Old and new values are stored as JSON.
+
+**Triggers**
+There are three triggers on `todos`: AFTER INSERT, AFTER UPDATE and AFTER DELETE.
+Each one adds a row to `todo_audit`. The update trigger skips updates where nothing
+actually changed.
+
+**Who made the change**
+The React app sends the user's name in an `X-User` header. Before each write, the backend
+runs `SET @app_user = '<name>'` on the database connection, and the trigger reads
+`@app_user` to fill the "changed by" column. The backend uses one connection and one
+transaction for this, because a session variable only exists on a single connection.
+If no user is set (for example, someone edits the table directly in Workbench), the
+trigger saves the database login instead.
+
+**Other choices**
+- `todo_audit` has no foreign key to `todos`, so the history is kept after a to-do is deleted.
+- The user name is not verified, since there is no login in this project. In a real
+  app it would come from a login token.
+
